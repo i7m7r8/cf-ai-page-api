@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Streaming Playground</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, monospace;
+            background: #0a0f1e;
+            color: #e2e8f0;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        textarea {
+            width: 100%;
+            padding: 12px;
+            font-size: 1rem;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            color: #f1f5f9;
+            font-family: inherit;
+            resize: vertical;
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 24px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.2s;
+            margin-top: 10px;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        button:disabled {
+            background: #475569;
+            cursor: not-allowed;
+        }
+        .response-area {
+            background: #0f172a;
+            border-radius: 16px;
+            padding: 20px;
+            margin-top: 20px;
+            border: 1px solid #334155;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 0.9rem;
+            min-height: 200px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .status {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-top: 10px;
+        }
+        .model-select {
+            background: #1e293b;
+            color: #f1f5f9;
+            padding: 8px;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            margin-left: 10px;
+        }
+        .flex {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🧠 AI Streaming Playground (Llama 3.3 70B)</h1>
+    <p>Powered by Cloudflare Workers AI + Pages Functions</p>
+
+    <div class="flex">
+        <label>API Key:</label>
+        <input type="password" id="apiKey" placeholder="Your API key" style="flex:1; padding:8px; border-radius:12px; border:1px solid #334155; background:#1e293b; color:white;">
+        <label>Model:</label>
+        <select id="model" class="model-select">
+            <option value="@cf/meta/llama-3.3-70b-instruct">Llama 3.3 70B</option>
+            <option value="@cf/meta/llama-3.2-3b-instruct">Llama 3.2 3B</option>
+            <option value="@cf/meta/llama-3.2-1b-instruct">Llama 3.2 1B</option>
+            <option value="@hf/mistral/mistral-7b-instruct-v0.2">Mistral 7B</option>
+        </select>
+    </div>
+
+    <textarea id="prompt" rows="4" placeholder="Ask something…&#10;Example: Write a Python function to reverse a linked list."></textarea>
+    <div>
+        <button id="sendBtn">✨ Generate (streaming)</button>
+        <button id="clearBtn">🗑️ Clear</button>
+    </div>
+    <div class="response-area" id="response"></div>
+    <div class="status" id="status">Ready</div>
+</div>
+
+<script>
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const promptInput = document.getElementById('prompt');
+    const responseDiv = document.getElementById('response');
+    const statusDiv = document.getElementById('status');
+    const apiKeyInput = document.getElementById('apiKey');
+    const modelSelect = document.getElementById('model');
+
+    let currentController = null;
+
+    async function streamChat() {
+        if (currentController) {
+            currentController.abort();
+        }
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+            statusDiv.innerText = '❌ Please enter your API key.';
+            return;
+        }
+        const prompt = promptInput.value.trim();
+        if (!prompt) {
+            statusDiv.innerText = '❌ Please enter a prompt.';
+            return;
+        }
+
+        responseDiv.innerHTML = '';
+        statusDiv.innerText = '⏳ Streaming...';
+
+        const controller = new AbortController();
+        currentController = controller;
+
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    prompt: prompt,
+                    model: modelSelect.value,
+                    stream: true,
+                }),
+                signal: controller.signal,
+            });
+
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(`HTTP ${res.status}: ${err}`);
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if (data === '[DONE]') continue;
+                        try {
+                            const parsed = JSON.parse(data);
+                            if (parsed.token) {
+                                responseDiv.innerHTML += parsed.token;
+                                // Auto scroll
+                                responseDiv.scrollTop = responseDiv.scrollHeight;
+                            }
+                        } catch (e) {
+                            // ignore parse errors
+                        }
+                    }
+                }
+            }
+            statusDiv.innerText = '✅ Done.';
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                statusDiv.innerText = '⏹️ Stream cancelled.';
+            } else {
+                statusDiv.innerText = `❌ Error: ${err.message}`;
+                console.error(err);
+            }
+        } finally {
+            currentController = null;
+        }
+    }
+
+    function clearResponse() {
+        responseDiv.innerHTML = '';
+        statusDiv.innerText = 'Cleared. Ready.';
+        if (currentController) {
+            currentController.abort();
+        }
+    }
+
+    sendBtn.addEventListener('click', streamChat);
+    clearBtn.addEventListener('click', clearResponse);
+    promptInput.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === 'Enter') streamChat();
+    });
+</script>
+</body>
+</html>
